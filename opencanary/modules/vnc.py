@@ -19,18 +19,50 @@ SECURITY_SEND = 3
 AUTH_SEND = 4
 AUTH_OVER = 5
 
-# if one of these is used in the VNC authentication attempt, alert that
-# a common password was tried
-COMMON_PASSWORDS = [
-    "111111",
-    "password",
-    "123456",
-    "111111",
-    "1234",
-    "administrator",
-    "root",
-    "passw0rd",
-]
+
+def load_password_list():
+    """
+    Load VNC common passwords from vncpasswords.txt (same directory as this module).
+    Lines beginning with '#' are treated as comments and skipped.
+    Non-ASCII entries are skipped with a warning.
+    Falls back to a built-in default list if the file is missing or unreadable,
+    and sets a flag so callers can detect the degraded state.
+    """
+    password_file = os.path.join(os.path.dirname(__file__), 'vncpasswords.txt')
+    fallback = [
+        "111111", "password", "123456",
+        "1234", "administrator", "root",
+        "passw0rd", "vizxv",
+    ]
+    seen = set()
+    passwords = []
+    try:
+        with open(password_file, 'r', encoding='ascii', errors='strict') as f:
+            for lineno, raw in enumerate(f, 1):
+                line = raw.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if not line.isascii():
+                    print(f"WARNING: vnc passwords line {lineno}: skipping non-ASCII entry")
+                    continue
+                if line in seen:
+                    print(f"WARNING: vnc passwords line {lineno}: duplicate entry '{line}' skipped")
+                    continue
+                seen.add(line)
+                passwords.append(line)
+        if not passwords:
+            print("WARNING: vncpasswords.txt is empty — falling back to built-in defaults")
+            return fallback, True
+        print(f"Loaded {len(passwords)} VNC passwords from {password_file}")
+        return passwords, False
+    except FileNotFoundError:
+        print(f"WARNING: {password_file} not found — falling back to built-in defaults")
+    except Exception as e:
+        print(f"ERROR: Failed to load VNC passwords ({e}) — falling back to built-in defaults")
+    return fallback, True
+
+
+COMMON_PASSWORDS, _PASSWORDS_ARE_FALLBACK = load_password_list()
 
 
 class ProtocolError(Exception):
@@ -50,9 +82,7 @@ class VNCProtocol(Protocol):
         self.serv_version = version
         self.state = PRE_INIT
 
-    def _send_handshake(
-        self,
-    ):
+    def _send_handshake(self):
         print("send handshake")
         version_string = "RFB {version}\n".format(
             version=self.serv_version.decode("utf-8")
@@ -66,7 +96,6 @@ class VNCProtocol(Protocol):
             raise ProtocolError()
         client_ver = data[4:-1]
 
-        # support single version for now
         if client_ver not in [RFB_33, RFB_37, RFB_38]:
             raise UnsupportedVersion()
 
@@ -75,10 +104,10 @@ class VNCProtocol(Protocol):
     def _send_security(self, client_ver):
         print("send security")
         if client_ver == RFB_33:
-            self.transport.write(b"\x00\x00\x00\x02")  # specify VNC auth using 4 bytes
+            self.transport.write(b"\x00\x00\x00\x02")
             self._send_auth()
         else:
-            self.transport.write(b"\x01\x02")  # VNC authentication
+            self.transport.write(b"\x01\x02")
             self.state = SECURITY_SEND
 
     def _recv_security(self, data=None):
@@ -87,9 +116,7 @@ class VNCProtocol(Protocol):
             raise ProtocolError()
         self._send_auth()
 
-    def _send_auth(
-        self,
-    ):
+    def _send_auth(self):
         print("send auth")
         self.challenge = os.urandom(16)
         self.transport.write(self.challenge)
@@ -118,28 +145,22 @@ class VNCProtocol(Protocol):
             raise ProtocolError()
         self._send_handshake()
 
-    def _send_auth_failed(
-        self,
-    ):
+    def _send_auth_failed(self):
         self.transport.write(
             b"\x00\x00\x00\x01"
-            + b"\x00\x00\x00\x16"  # response code
-            + b"Authentication failure"  # message length
-        )  # Message
+            + b"\x00\x00\x00\x16"
+            + b"Authentication failure"
+        )
         self.state = AUTH_OVER
         raise ProtocolError()
 
     def _try_decrypt_response(self, response=None):
-        # attempt to decrypt each of the common passwords
-        # really inefficient, but it means we don't have to rely on
-        # a static challenge
         for password in COMMON_PASSWORDS:
-            pw = password[:8]  # vnc passwords are max 8 chars
+            pw = password[:8]
             if len(pw) < 8:
                 pw += "\x00" * (8 - len(pw))
 
             pw = pw.encode("ascii")
-            # VNC use of DES requires password bits to be mirrored
             values = bytearray()
             for x in pw:
                 values.append(int("{:08b}".format(x)[::-1], 2))
@@ -151,9 +172,6 @@ class VNCProtocol(Protocol):
         return None
 
     def dataReceived(self, data):
-        """
-        Received data is unbuffered so we buffer it for telnet.
-        """
         try:
             if self.state == HANDSHAKE_SEND:
                 self._recv_handshake(data=data)
